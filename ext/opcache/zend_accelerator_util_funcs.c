@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | Zend OPcache                                                         |
    +----------------------------------------------------------------------+
-   | Copyright (c) 1998-2018 The PHP Group                                |
+   | Copyright (c) The PHP Group                                          |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,7 +26,7 @@
 #include "zend_shared_alloc.h"
 
 #if SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG
-/* If sizeof(void*) == sizeof(ulong) we can use zend_hash index functions */
+/* If sizeof(void*) == sizeof(zend_ulong) we can use zend_hash index functions */
 # define accel_xlat_set(old, new)	zend_hash_index_add_new_ptr(&ZCG(bind_hash), (zend_ulong)(zend_uintptr_t)(old), (new))
 # define accel_xlat_get(old)		zend_hash_index_find_ptr(&ZCG(bind_hash), (zend_ulong)(zend_uintptr_t)(old))
 #else
@@ -49,12 +49,12 @@ zend_persistent_script* create_persistent_script(void)
 	zend_persistent_script *persistent_script = (zend_persistent_script *) emalloc(sizeof(zend_persistent_script));
 	memset(persistent_script, 0, sizeof(zend_persistent_script));
 
-	zend_hash_init(&persistent_script->script.function_table, 128, NULL, ZEND_FUNCTION_DTOR, 0);
+	zend_hash_init(&persistent_script->script.function_table, 0, NULL, ZEND_FUNCTION_DTOR, 0);
 	/* class_table is usually destroyed by free_persistent_script() that
 	 * overrides destructor. ZEND_CLASS_DTOR may be used by standard
 	 * PHP compiler
 	 */
-	zend_hash_init(&persistent_script->script.class_table, 16, NULL, ZEND_CLASS_DTOR, 0);
+	zend_hash_init(&persistent_script->script.class_table, 0, NULL, ZEND_CLASS_DTOR, 0);
 
 	return persistent_script;
 }
@@ -64,6 +64,8 @@ void free_persistent_script(zend_persistent_script *persistent_script, int destr
 	if (!destroy_elements) {
 		persistent_script->script.function_table.pDestructor = NULL;
 		persistent_script->script.class_table.pDestructor = NULL;
+	} else {
+		destroy_op_array(&persistent_script->script.main_op_array);
 	}
 
 	zend_hash_destroy(&persistent_script->script.function_table);
@@ -76,26 +78,65 @@ void free_persistent_script(zend_persistent_script *persistent_script, int destr
 	efree(persistent_script);
 }
 
-void zend_accel_move_user_functions(HashTable *src, zend_script *script)
+void zend_accel_move_user_functions(HashTable *src, uint32_t count, zend_script *script)
 {
-	Bucket *p;
-	HashTable *dst = &script->function_table;
-	zend_string *filename = script->main_op_array.filename;
-	dtor_func_t orig_dtor = src->pDestructor;
+	Bucket *p, *end;
+	HashTable *dst;
+	zend_string *filename;
+	dtor_func_t orig_dtor;
+	zend_function *function;
 
+	if (!count) {
+		return;
+	}
+
+	dst = &script->function_table;
+	filename = script->main_op_array.filename;
+	orig_dtor = src->pDestructor;
 	src->pDestructor = NULL;
-	zend_hash_extend(dst, dst->nNumUsed + src->nNumUsed, 0);
-	ZEND_HASH_REVERSE_FOREACH_BUCKET(src, p) {
-		zend_function *function = Z_PTR(p->val);
-
+	zend_hash_extend(dst, count, 0);
+	end = src->arData + src->nNumUsed;
+	p = end - count;
+	for (; p != end; p++) {
+		if (UNEXPECTED(Z_TYPE(p->val) == IS_UNDEF)) continue;
+		function = Z_PTR(p->val);
 		if (EXPECTED(function->type == ZEND_USER_FUNCTION)
 		 && EXPECTED(function->op_array.filename == filename)) {
 			_zend_hash_append_ptr(dst, p->key, function);
 			zend_hash_del_bucket(src, p);
-		} else {
-			break;
 		}
-	} ZEND_HASH_FOREACH_END();
+	}
+	src->pDestructor = orig_dtor;
+}
+
+void zend_accel_move_user_classes(HashTable *src, uint32_t count, zend_script *script)
+{
+	Bucket *p, *end;
+	HashTable *dst;
+	zend_string *filename;
+	dtor_func_t orig_dtor;
+	zend_class_entry *ce;
+
+	if (!count) {
+		return;
+	}
+
+	dst = &script->class_table;
+	filename = script->main_op_array.filename;
+	orig_dtor = src->pDestructor;
+	src->pDestructor = NULL;
+	zend_hash_extend(dst, count, 0);
+	end = src->arData + src->nNumUsed;
+	p = end - count;
+	for (; p != end; p++) {
+		if (UNEXPECTED(Z_TYPE(p->val) == IS_UNDEF)) continue;
+		ce = Z_PTR(p->val);
+		if (EXPECTED(ce->type == ZEND_USER_CLASS)
+		 && EXPECTED(ce->info.user.filename == filename)) {
+			_zend_hash_append_ptr(dst, p->key, ce);
+			zend_hash_del_bucket(src, p);
+		}
+	}
 	src->pDestructor = orig_dtor;
 }
 
@@ -104,7 +145,7 @@ static void zend_hash_clone_constants(HashTable *ht)
 	Bucket *p, *end;
 	zend_class_constant *c;
 
-	if (!(HT_FLAGS(ht) & HASH_FLAG_INITIALIZED)) {
+	if (HT_FLAGS(ht) & HASH_FLAG_UNINITIALIZED) {
 		return;
 	}
 
@@ -135,7 +176,7 @@ static void zend_hash_clone_methods(HashTable *ht)
 
 	ht->pDestructor = ZEND_FUNCTION_DTOR;
 
-	if (!(HT_FLAGS(ht) & HASH_FLAG_INITIALIZED)) {
+	if (HT_FLAGS(ht) & HASH_FLAG_UNINITIALIZED) {
 		return;
 	}
 
@@ -173,7 +214,7 @@ static void zend_hash_clone_prop_info(HashTable *ht)
 	Bucket *p, *end;
 	zend_property_info *prop_info;
 
-	if (!(HT_FLAGS(ht) & HASH_FLAG_INITIALIZED)) {
+	if (HT_FLAGS(ht) & HASH_FLAG_UNINITIALIZED) {
 		return;
 	}
 
@@ -193,13 +234,38 @@ static void zend_hash_clone_prop_info(HashTable *ht)
 			if (IN_ARENA(prop_info->ce)) {
 				prop_info->ce = ARENA_REALLOC(prop_info->ce);
 			}
+
+			if (ZEND_TYPE_HAS_LIST(prop_info->type)) {
+				zend_type_list *list = ZEND_TYPE_LIST(prop_info->type);
+				if (IN_ARENA(list)) {
+					list = ARENA_REALLOC(list);
+					ZEND_TYPE_SET_PTR(prop_info->type, list);
+
+					zend_type *list_type;
+					ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(prop_info->type), list_type) {
+						if (ZEND_TYPE_HAS_CE(*list_type)) {
+							zend_class_entry *ce = ZEND_TYPE_CE(*list_type);
+							if (IN_ARENA(ce)) {
+								ce = ARENA_REALLOC(ce);
+								ZEND_TYPE_SET_PTR(*list_type, ce);
+							}
+						}
+					} ZEND_TYPE_LIST_FOREACH_END();
+				}
+			} else if (ZEND_TYPE_HAS_CE(prop_info->type)) {
+				zend_class_entry *ce = ZEND_TYPE_CE(prop_info->type);
+				if (IN_ARENA(ce)) {
+					ce = ARENA_REALLOC(ce);
+					ZEND_TYPE_SET_PTR(prop_info->type, ce);
+				}
+			}
 		}
 	}
 }
 
 #define zend_update_inherited_handler(handler) \
 { \
-	if (ce->handler != NULL) { \
+	if (ce->handler != NULL && IN_ARENA(ce->handler)) { \
 		ce->handler = ARENA_REALLOC(ce->handler); \
 	} \
 }
@@ -223,7 +289,7 @@ static void zend_class_copy_ctor(zend_class_entry **pce)
 		end = src + ce->default_properties_count;
 		ce->default_properties_table = dst;
 		for (; src != end; src++, dst++) {
-			ZVAL_COPY_VALUE(dst, src);
+			ZVAL_COPY_VALUE_PROP(dst, src);
 		}
 	}
 
@@ -265,6 +331,16 @@ static void zend_class_copy_ctor(zend_class_entry **pce)
 	/* constants table */
 	zend_hash_clone_constants(&ce->constants_table);
 
+	if (ce->properties_info_table) {
+		int i;
+		ce->properties_info_table = ARENA_REALLOC(ce->properties_info_table);
+		for (i = 0; i < ce->default_properties_count; i++) {
+			if (IN_ARENA(ce->properties_info_table[i])) {
+				ce->properties_info_table[i] = ARENA_REALLOC(ce->properties_info_table[i]);
+			}
+		}
+	}
+
 	if (ce->num_interfaces) {
 		zend_class_name *interface_names;
 
@@ -293,17 +369,13 @@ static void zend_class_copy_ctor(zend_class_entry **pce)
 	zend_update_inherited_handler(__get);
 	zend_update_inherited_handler(__set);
 	zend_update_inherited_handler(__call);
-/* 5.1 stuff */
-	zend_update_inherited_handler(serialize_func);
-	zend_update_inherited_handler(unserialize_func);
 	zend_update_inherited_handler(__isset);
 	zend_update_inherited_handler(__unset);
-/* 5.2 stuff */
 	zend_update_inherited_handler(__tostring);
-
-/* 5.3 stuff */
 	zend_update_inherited_handler(__callstatic);
 	zend_update_inherited_handler(__debugInfo);
+	zend_update_inherited_handler(__serialize);
+	zend_update_inherited_handler(__unserialize);
 
 /* 5.4 traits */
 	if (ce->num_traits) {
@@ -365,8 +437,16 @@ static void zend_accel_function_hash_copy(HashTable *target, HashTable *source)
 		t = zend_hash_find_ex(target, p->key, 1);
 		if (UNEXPECTED(t != NULL)) {
 			if (EXPECTED(ZSTR_LEN(p->key) > 0) && EXPECTED(ZSTR_VAL(p->key)[0] == 0)) {
-				/* Mangled key */
-				t = zend_hash_update(target, p->key, &p->val);
+				/* Runtime definition key. There are two circumstances under which the key can
+				 * already be defined:
+				 *  1. The file has been re-included without being changed in the meantime. In
+				 *     this case we can keep the old value, because we know that the definition
+				 *     hasn't changed.
+				 *  2. The file has been changed in the meantime, but the RTD key ends up colliding.
+				 *     This would be a bug.
+				 * As we can't distinguish these cases, we assume that it is 1. and keep the old
+				 * value. */
+				continue;
 			} else {
 				goto failure;
 			}
@@ -409,8 +489,8 @@ static void zend_accel_function_hash_copy_from_shm(HashTable *target, HashTable 
 		t = zend_hash_find_ex(target, p->key, 1);
 		if (UNEXPECTED(t != NULL)) {
 			if (EXPECTED(ZSTR_LEN(p->key) > 0) && EXPECTED(ZSTR_VAL(p->key)[0] == 0)) {
-				/* Mangled key */
-				zend_hash_update_ptr(target, p->key, Z_PTR(p->val));
+				/* See comment in zend_accel_function_hash_copy(). */
+				continue;
 			} else {
 				goto failure;
 			}
@@ -452,7 +532,7 @@ static void zend_accel_class_hash_copy(HashTable *target, HashTable *source)
 		t = zend_hash_find_ex(target, p->key, 1);
 		if (UNEXPECTED(t != NULL)) {
 			if (EXPECTED(ZSTR_LEN(p->key) > 0) && EXPECTED(ZSTR_VAL(p->key)[0] == 0)) {
-				/* Mangled key - ignore and wait for runtime */
+				/* See comment in zend_accel_function_hash_copy(). */
 				continue;
 			} else if (UNEXPECTED(!ZCG(accel_directives).ignore_dups)) {
 				zend_class_entry *ce1 = Z_PTR(p->val);
@@ -489,7 +569,7 @@ static void zend_accel_class_hash_copy_from_shm(HashTable *target, HashTable *so
 		t = zend_hash_find_ex(target, p->key, 1);
 		if (UNEXPECTED(t != NULL)) {
 			if (EXPECTED(ZSTR_LEN(p->key) > 0) && EXPECTED(ZSTR_VAL(p->key)[0] == 0)) {
-				/* Mangled key - ignore and wait for runtime */
+				/* See comment in zend_accel_function_hash_copy(). */
 				continue;
 			} else if (UNEXPECTED(!ZCG(accel_directives).ignore_dups)) {
 				zend_class_entry *ce1 = Z_PTR(p->val);
@@ -515,7 +595,9 @@ static void zend_accel_class_hash_copy_from_shm(HashTable *target, HashTable *so
 	return;
 }
 
-#if defined(__AVX__)
+#if __has_feature(memory_sanitizer)
+# define fast_memcpy memcpy
+#elif defined(__AVX__)
 # include <nmmintrin.h>
 # if defined(__GNUC__) && defined(__i386__)
 static zend_always_inline void fast_memcpy(void *dest, const void *src, size_t size)
@@ -775,11 +857,11 @@ zend_op_array* zend_accel_load_script(zend_persistent_script *persistent_script,
 #define ADLER32_DO8(buf, i)     ADLER32_DO4(buf, i); ADLER32_DO4(buf, i + 4);
 #define ADLER32_DO16(buf)       ADLER32_DO8(buf, 0); ADLER32_DO8(buf, 8);
 
-unsigned int zend_adler32(unsigned int checksum, signed char *buf, uint32_t len)
+unsigned int zend_adler32(unsigned int checksum, unsigned char *buf, uint32_t len)
 {
 	unsigned int s1 = checksum & 0xffff;
 	unsigned int s2 = (checksum >> 16) & 0xffff;
-	signed char *end;
+	unsigned char *end;
 
 	while (len >= ADLER32_NMAX) {
 		len -= ADLER32_NMAX;
@@ -817,15 +899,15 @@ unsigned int zend_adler32(unsigned int checksum, signed char *buf, uint32_t len)
 
 unsigned int zend_accel_script_checksum(zend_persistent_script *persistent_script)
 {
-	signed char *mem = (signed char*)persistent_script->mem;
+	unsigned char *mem = (unsigned char*)persistent_script->mem;
 	size_t size = persistent_script->size;
 	size_t persistent_script_check_block_size = ((char *)&(persistent_script->dynamic_members)) - (char *)persistent_script;
 	unsigned int checksum = ADLER32_INIT;
 
-	if (mem < (signed char*)persistent_script) {
-		checksum = zend_adler32(checksum, mem, (signed char*)persistent_script - mem);
-		size -= (signed char*)persistent_script - mem;
-		mem  += (signed char*)persistent_script - mem;
+	if (mem < (unsigned char*)persistent_script) {
+		checksum = zend_adler32(checksum, mem, (unsigned char*)persistent_script - mem);
+		size -= (unsigned char*)persistent_script - mem;
+		mem  += (unsigned char*)persistent_script - mem;
 	}
 
 	zend_adler32(checksum, mem, persistent_script_check_block_size);

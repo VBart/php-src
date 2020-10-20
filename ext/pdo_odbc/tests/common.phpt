@@ -1,13 +1,13 @@
 --TEST--
 ODBC
 --SKIPIF--
-<?php # vim:ft=php
+<?php
 if (!extension_loaded('pdo_odbc')) print 'skip';
 if (substr(PHP_OS, 0, 3) == 'WIN' &&
-	false === getenv('PDOTEST_DSN') &&
-	false === getenv('PDO_ODBC_TEST_DSN') &&
-	!extension_loaded('com_dotnet')) {
-	die('skip - either PDOTEST_DSN or com_dotnet extension is needed to setup the connection');
+    false === getenv('PDOTEST_DSN') &&
+    false === getenv('PDO_ODBC_TEST_DSN') &&
+    !extension_loaded('com_dotnet')) {
+    die('skip - either PDOTEST_DSN or com_dotnet extension is needed to setup the connection');
 }
 --REDIRECTTEST--
 # magic auto-configuration
@@ -46,7 +46,7 @@ if (false !== getenv('PDOTEST_DSN')) {
 	// on Windows and user didn't set PDOTEST_DSN, try this as a fallback:
 	// check if MS Access DB is installed, and if yes, try using it. create a temporary MS access database.
 	//
-	$path = realpath(dirname(__FILE__)) . '\pdo_odbc.mdb';
+	$path = realpath(__DIR__) . '\pdo_odbc.mdb';
 	if (!file_exists($path)) {
 		try {
 			// try to create database

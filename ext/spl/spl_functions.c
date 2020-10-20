@@ -1,8 +1,6 @@
 /*
    +----------------------------------------------------------------------+
-   | PHP Version 7                                                        |
-   +----------------------------------------------------------------------+
-   | Copyright (c) 1997-2018 The PHP Group                                |
+   | Copyright (c) The PHP Group                                          |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -77,7 +75,7 @@ void spl_register_property( zend_class_entry * class_entry, char *prop_name, int
 /* {{{ spl_add_class_name */
 void spl_add_class_name(zval *list, zend_class_entry *pce, int allow, int ce_flags)
 {
-	if (!allow || (allow > 0 && pce->ce_flags & ce_flags) || (allow < 0 && !(pce->ce_flags & ce_flags))) {
+	if (!allow || (allow > 0 && (pce->ce_flags & ce_flags)) || (allow < 0 && !(pce->ce_flags & ce_flags))) {
 		zval *tmp;
 
 		if ((tmp = zend_hash_find(Z_ARRVAL_P(list), pce->name)) == NULL) {
@@ -142,12 +140,3 @@ zend_string * spl_gen_private_prop_name(zend_class_entry *ce, char *prop_name, i
 	return zend_mangle_property_name(ZSTR_VAL(ce->name), ZSTR_LEN(ce->name), prop_name, prop_len, 0);
 }
 /* }}} */
-
-/*
- * Local variables:
- * tab-width: 4
- * c-basic-offset: 4
- * End:
- * vim600: fdm=marker
- * vim: noet sw=4 ts=4
- */
